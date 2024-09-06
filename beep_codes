@@ -9,7 +9,7 @@ Calibration Mode: 1 Long - _ Short
 
 WiFi Errors: 2 Long - _ Short
 -----------------------------
-2 = SSID not found - check settings.toml file
+2 = SSID not found - check settings.json file
 3 = Authentication error - check WiFi password in settings.toml file
 4 = General connection failure - view serial output to diagnose
 5 = Unhandled error - view serial output to diagnose
