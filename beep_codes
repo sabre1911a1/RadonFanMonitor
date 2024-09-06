@@ -1,0 +1,18 @@
+Calibration Mode: 1 Long - _ Short
+----------------------------------
+2 = Starting calibration - should take about 5 minutes
+3 = Calibration successfully written to calib.json
+4 = Failed to update calib.json
+
+WiFi Errors: 2 Long - _ Short
+-----------------------------
+2 = SSID not found - check settings.toml file
+3 = Authentication error - check WiFi password in settings.toml file
+4 = General connection failure - view serial output to diagnose
+5 = Unhandled error - view serial output to diagnose
+
+Sensor or bus Error: 3 Long - _ Short 
+-------------------------------------
+2 = No pull up found on SDA or SCL - check wiring from GPIO 20 (MCU) to SDA (MPRLS) and from GPIO 21 (MCU) to SCL (MPRLS)
+3 = Unhandled error - view serial output to diagnose
+4 = MPRLS sensor not found on i2c bus - check sensor wiring or replace sensor module
