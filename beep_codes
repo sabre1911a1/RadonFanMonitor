@@ -1,8 +1,11 @@
 Calibration Mode: 1 Long - _ Short
 ----------------------------------
-2 = Starting calibration - should take about 5 minutes
-3 = Calibration successfully written to calib.json
-4 = Failed to update calib.json
+2 = Starting ambient calibration - should take about 5 minutes
+3 = Starting working calibration - should take about 5 minutes
+4 = Ambient calibration value successfully updated - device will do nothing after this
+5 = Working calibration value successfully updated - device will reboot and begin monitoring
+6 = Error updating ambient value in settings.json file
+7 = Error updating working value in settings.json file
 
 WiFi Errors: 2 Long - _ Short
 -----------------------------
