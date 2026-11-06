@@ -1,6 +1,6 @@
 # Beep patterns — v2.0
 
-The v2 firmware **does not** use the old numerical 2024 calibration / Wi-Fi error codes. The original repo's `beep_codes` file has been retained only for historical context (and should not be followed when troubleshooting v2).
+The v2 firmware **does not** use the old numerical 2024 calibration / Wi-Fi error codes. The original repo's top-level `beep_codes` is now a deprecation pointer; the obsolete 2024 contents remain accessible in Git history and should not be followed when troubleshooting v2.
 
 | Pattern | Meaning | Action |
 |---|---|---|
