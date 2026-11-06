@@ -159,6 +159,13 @@ class Monitor:
             self.total_failures += 1
             self.consecutive_failures += 1
             self.recovery_good_samples = 0
+            # A failed reading during fault recovery invalidates the partial
+            # recovery history; only a fresh run of good pairs may clear it.
+            if self.state == FAULT:
+                self.sum_values = 0.0
+                self.value_count = 0
+                self.write_index = 0
+                self.average_suction_hpa = None
             self.last_error = str(exc)[:100]
             if self.consecutive_failures >= self.cfg["sensor_fault_after"] or self.last_sample_ok_s is None:
                 self._mark_fault(now)
