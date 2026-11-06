@@ -1,0 +1,25 @@
+# Device-specific secrets and calibration
+CIRCUITPY/settings.json
+**/settings.backup.json
+**/settings.tmp.json
+**/settings.toml
+**/secrets.py
+**/secrets.toml
+*.env
+.env*
+
+# CIRCUITPY board artifacts and compiled libraries
+*.mpy
+*.uf2
+boot_out.txt
+*.bin
+
+# Python / IDE artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+.vscode/
+.idea/
+.DS_Store
