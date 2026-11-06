@@ -1,12 +1,13 @@
-# Beep patterns — v2.0
+# Audible indications — v2.1
 
-The v2 firmware **does not** use the old numerical 2024 calibration / Wi-Fi error codes. The original repo's top-level `beep_codes` is now a deprecation pointer; the obsolete 2024 contents remain accessible in Git history and should not be followed when troubleshooting v2.
+The old 2024 multi-digit calibration/Wi-Fi codes are **not used by this firmware**.
 
-| Pattern | Meaning | Action |
+| Pattern | Status | What to do |
 |---|---|---|
-| Repeating **five short beeps** | `LOW_SUCTION_ALARM`: measured absolute pressure has crossed the configured threshold for the configured delay | Check mitigation fan, tubing, and pressure setup; verify indoor radon independently |
-| Repeating **three longer beeps** | `MONITOR_FAULT`: sensor is missing, readings invalid/stale, or no readings are trustworthy | Check sensor wiring (SDA **GP12**, SCL **GP13**), sensor power, and USB serial output |
-| No beeps | Normal, awaiting alarm delay, or currently acknowledged/silenced | Check status page/serial; silence does **not** mean a fault is cleared |
-| Repeating long fault-like pattern during startup | Fatal configuration/software error | Inspect USB serial output and `settings.json` |
+| Repeating **five short beeps** | `LOW_SUCTION_ALARM` | Valid paired readings indicate sustained inadequate suction. Verify fan, tubing, conventional manometer, and radon separately. |
+| Repeating **three longer beeps** | `MONITOR_FAULT` | One/both pressure sensors cannot be read reliably, data is stale, or configuration/software failed. Inspect USB serial and I²C on GP12/GP13. |
+| Silence | May be NORMAL, PENDING, STARTUP or **acknowledged alarm** | Check the dashboard or serial status. Silence alone does not mean healthy. |
 
-The v2 buzzer does not provide a Wi-Fi-disconnected beep: **the local monitor continues while offline**. The friend's UniFi Network installation can separately alert when the Pico wireless client disappears, but that is a network-presence check, not an application-health check.
+The alarm can be **acknowledged** from the trusted LAN web page. Acknowledgment only silences the *current* buzzer; it does not clear the alarm state. A new alarm episode re-enables the buzzer. Wi-Fi outages do not cause local beeping: the mitigation alarm continues independently, while UniFi may provide a wireless-client disconnect notification.
+
+Calibration progress and failures are printed to the USB serial console; do not rely on undocumented legacy beep numbers for those operations.

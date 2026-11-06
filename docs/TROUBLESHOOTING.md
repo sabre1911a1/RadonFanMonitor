@@ -1,52 +1,29 @@
-# Troubleshooting & audible patterns — v2.0
+# Troubleshooting — v2.1
 
-These patterns replace the original (now-obsolete) 2024 multi-part diagnostic beep codes.
+Open a USB serial console and look for `[radon]` messages. Do **not** assume that a silent buzzer or an associated Wi-Fi client means the pressure measurement is valid.
 
-| Sound | State / meaning | First checks |
+| Symptom | Probable causes | What to check |
 |---|---|---|
-| Five **short** beeps, repeats | `LOW_SUCTION_ALARM` | Fan operating? Pipe/tubing connection? Recent barometric changes? Review threshold and serial readings. |
-| Three **long** beeps, repeats | `MONITOR_FAULT` | MPRLS sensor/I²C power and pins GP12 SDA, GP13 SCL, GP15 reset, GP16 EOC; bad sample or stale reading. |
-| Three **long** beeps during startup/configuration error | Fatal startup fault | USB serial output; malformed/missing `settings.json`, invalid settings, or incompatible library. |
-| Silent after web acknowledgment | Current alarm acknowledged | Dashboard still shows actual state; any newly entered alarm sounds again. |
-| Silent, with no readings | NOT proof of healthy operation | Inspect USB serial, web status, and independent UniFi client-presence monitoring. |
+| `ImportError: adafruit_bme280` or `adafruit_bus_device` | Missing or incompatible libraries | Install **matching CircuitPython 9.x** `.mpy` libraries in `/lib/` (BME280 uses `basic.mpy` and `protocol.mpy`). Check `boot_out.txt`. |
+| `MONITOR_FAULT`, BME280 missing | No BME280 / wrong I²C address | GP12 SDA, GP13 SCL, 3V3, GND. Default BME address `119` = 0x77, alternate `118` = 0x76. |
+| `MONITOR_FAULT`, MPRLS missing | Pressure sensor, I²C or reset/EOC problem | MPRLS address 0x18, GP15 reset and GP16 EOC, same SDA/SCL pins, USB serial details. |
+| `MONITOR_FAULT` after readings worked | Repeated invalid/failed pressure pair or stale sampling | Examine `/status.json` fields `last_sensor_error`, `consecutive_failures`, `seconds_since_valid_reading`; power-cycle for persistent hardware fault. |
+| Repeating three longer beeps | Sensor failure or fatal config/software problem | USB serial, correct `/settings.json`, both sensors installed. |
+| Repeating five short beeps | Loss-of-suction alarm | Verify mitigation fan and pressure tubing, compare with a **manometer**, perform independent radon measurement as appropriate. |
+| Suspicious normal reading | Drift, wrong offset/baseline, leaky tube | Compare both sensors with tubing unplugged (deliberate zero stage), inspect physical tubing, and check reference manometer. **Do not auto-zero during operation.** |
+| Too many false alarms | 10% threshold may be too sensitive | Characterize noise/offset drift over several days; adjust `alarm_loss_percent`, `hysteresis_hpa`, `alarm_delay_s` only based on evidence. |
+| No web page but buzzer still works | No Wi-Fi/incorrect credentials, web listener stopped, LAN isolation | Check DHCP/UniFi, serial logging and client connectivity. Wi-Fi is optional for local alarm. |
+| Device restarts during Wi-Fi events | Blocking network activity or watchdog timeout | Capture reset reason, reduce network exposure, test AP power loss and recovery on physical Pico. |
+| No monitoring after install | `calibration_stage` intentionally starts at `zero` | Complete zero calibration with MPRLS port open to room air, then baseline with fan running and tube connected. |
+| Calibration stops with a fault | Either sensor failed or insufficient suction | Verify wiring, correct tubing condition for the stage, and serial error before restarting calibration. |
+| `settings.json` missing after power loss | Interrupted file replacement during calibration | Power down; use host computer to restore from `settings.backup.json` or a separately saved known-good copy. |
+| UniFi reports Pico online but monitor faulty | Network association is not application health | Inspect local buzzer and `/status.json`; UniFi client-disconnect alerts are only a secondary presence signal. |
 
-## No Wi-Fi or web page
+## Checking differential math by hand
 
-1. This is **not** supposed to prevent local pressure monitoring.
-2. `settings.json` must contain `ssid` and `wifi_pwd` (no `.toml` in this release).
-3. Pico W requires a 2.4 GHz network. Review Wi-Fi VLAN / client isolation / firewall behavior, DHCP and AP association.
-4. Browse to the device IP: `http://<IP>/` or `http://<IP>/status.json`. Port 80 is used.
-5. Observe `[radon]` serial messages such as `Wi-Fi unavailable` or `Web server started`.
-6. Watch `last_wifi_error`, `last_http_error`, `http_failures`, and `wifi_connect_attempts` when the JSON endpoint becomes available.
-7. After a successful first association, CircuitPython provides Wi-Fi reconnection; a periodic bounded application retry is also attempted.
+1. During **zero stage**, both sensors must see the **same room air**. The resulting average `BME280 - MPRLS` is `sensor_offset_hpa` (it may be negative or zero).
+2. During **baseline stage**, the tube is attached and the fan is running. The corrected difference is the saved `baseline_suction_hpa`.
+3. During monitoring, the live value is `(room − pipe − offset)` hPa, or divide by **2.49089** for inches of water column.
+4. The default minimum is `baseline_suction_hpa × 0.90`. A 2.911 hPa baseline would trigger pending at **2.620 hPa** or below, and recover an active alarm at **2.770 hPa** or higher (0.15 hPa hysteresis).
 
-## Low-suction warning seems too sensitive
-
-- The saved threshold is 10% loss of the calibration difference, near **950.156 hPa absolute** for the preserved 2024 numbers. This is VERY close to the original operating-pressure snapshot.
-- Weather can change atmospheric pressure much more than that small 0.291 hPa threshold margin.
-- Review the actual running average, and consider a more permissive `alarm_loss_percent` after testing; the historical design notes suggested 65% as a trial value.
-- All of these are approximate fan-operation clues. The present hardware cannot measure live differential suction or radon concentration.
-
-## Missing Adafruit I²C helper on startup
-
-The original bundled `adafruit_mprls.mpy` imports `adafruit_bus_device.i2c_device`. This helper can be built into some CircuitPython builds, which likely explains why the historic flash dump did not contain it. If the serial console says `ImportError: no module named adafruit_bus_device`, install the library from the compatible **CircuitPython 9.x** Adafruit bundle. Do not add a second copy if the firmware already includes it.
-
-## Pressure is missing / implausible
-
-- Power off before rewiring.
-- Check I²C SDA GP12, SCL GP13 (NOT obsolete GP20/GP21), 3V3, GND, reset GP15, EOC GP16.
-- A failed sensor read is caught; successive failures enter MONITOR_FAULT. Reinitialization is attempted at the next scheduled sample.
-- Investigate the sensor's port and tubing for condensate, leakage, blockage, or accidental disconnection (without introducing fluid into the electronics).
-
-## Calibration / flash corruption
-
-- Recalibration starts only when either `ambient_pressure_hpa` or `working_pressure_hpa` is 0. Normal operation keeps the Pico's own flash access read-only.
-- If an interrupted flash write leaves `settings.json` unreadable/missing, restore a valid copy from your PC backup. `settings.backup.json` contains the last pre-write configuration.
-- Host and Pico must NOT modify the CIRCUITPY volume at the same time during calibration. Safe-eject CIRCUITPY before running the calibrating device.
-- During the first ambient stage the device intentionally waits for you to power off, attach the tubing, then power on; this is not a hang.
-
-## Diagnosis from JSON
-
-The `/status.json` endpoint reports `state`, `sensor_healthy`, `last_reading_hpa`, `rolling_average_hpa`, calibrated absolute values, thresholds, ages of recent readings, successful/failed sample counts, previous sensor error, reset reason, and free-heap statistics.
-
-The fan or pressure tube may fail in ways that don't change the monitored pressure significantly. The Pico might also keep Wi-Fi association while pressure monitoring has failed. **UniFi client-disconnect notifications are only supplemental.**
+Test both sensors and compare to a real differential manometer before unattended deployment. Pressure is not radon concentration.

@@ -1,18 +1,35 @@
-# Pico W wiring — verified against original project and WireMap.xlsx
+# Pico W wiring — v2.1
 
-| Device | Connection | Pico W |
+The original 2024 wiring spreadsheet and code agree on the MPRLS connections below. The **BME280 is added to the same I²C bus**, not connected to the pipe.
+
+| Function | Pico W | Physical device connection |
 |---|---|---|
-| MPRLS | SDA (white/green) | GP12 |
-| MPRLS | SCL (green) | GP13 |
-| MPRLS | Reset (brown) | GP15 |
-| MPRLS | End of conversion / EOC (white/brown) | GP16 |
-| MPRLS | 3.3V (blue) | 3V3 supply |
-| MPRLS | GND (white/blue) | GND |
-| Piezo buzzer | Positive (blue) | GP2 |
-| Piezo buzzer | Negative (white/blue) | GND |
+| I²C SDA | **GP12** | MPRLS SDA **and** BME280 SDI/SDA |
+| I²C SCL | **GP13** | MPRLS SCL **and** BME280 SCK/SCL |
+| MPRLS reset | GP15 | MPRLS RST |
+| MPRLS end of conversion | GP16 | MPRLS EOC |
+| Buzzer positive | GP2 | Piezo + |
+| Shared 3.3 V | Pico **3V3(OUT)** | MPRLS VIN and BME280 VIN (Adafruit breakout compatible) |
+| Shared ground | GND | Both breakouts and buzzer - |
 
-The MPRLS **ported pressure fitting** connects through tubing to the radon mitigation suction pipe. The MPRLS board and Pico stay in the room, not in the airflow. The sensor reading is the absolute pressure at that fitting; the board does **not** automatically produce a differential reading between pipe and room.
+Original harness color reference: SDA **white/green**, SCL **green**, MPRLS reset **brown**, MPRLS EOC **white/brown**, 3.3 V **blue**, GND **white/blue**, piezo + **blue**. There is **no historical color mapping for the new BME280 wires**; choose and document one before permanent assembly.
 
-The historic `Beep Codes.txt` incorrectly described GP20/GP21 for I²C. The actual original spreadsheet and software use **GP12 (SDA), GP13 (SCL)**. Do not follow the obsolete pin numbers. The original `wire_map.png` remains in the repository root for historical reference; this text file is the corrected wiring reference for v2.
+**BME280 address:** Adafruit's board defaults to **0x77** (`bme280_i2c_address: 119`). Some configurations use **0x76** (`118` decimal). The MPRLS address is **0x18**. Ensure SDA/SCL and supply share a common reference. The Adafruit breakouts provide I²C pull-ups; confirm appropriate bus voltage when mixing boards.
 
-**Never connect a GPIO directly to the pipe or to mains wiring.** Turn off power when attaching or removing sensor electrical connections; confirm the breakout uses 3.3V logic before connecting to the Pico.
+## Physical arrangement
+
+```text
+Room air        [BME280]  (vented enclosure, no tube)
+    |               |
+    +-- Pico W ------+--- I²C bus GP12/13
+           |
+           +--- [MPRLS port]--- tubing ---> suction tap in radon pipe
+           |
+           +--- [Piezo buzzer] GP2
+```
+
+The pressure tube goes **only** from the MPRLS port to the radon suction pipe. The BME280 must sense room air, away from enclosed heat, water ingress, or direct drafts. Power the Pico **off** for wiring changes. Avoid any mains wiring around the sensor connectors.
+
+**Calibration:** For the *zero* stage, disconnect tubing from the MPRLS pressure port, exposing it to room air alongside the BME280. For the *baseline* stage, reconnect tubing and verify the mitigation fan is operating normally.
+
+The original project's beep troubleshooting documentation incorrectly instructed using GP20/GP21 for I²C. Those pins are not the actual SDA/SCL assignments; use GP12 and GP13.

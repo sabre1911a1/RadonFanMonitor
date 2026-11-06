@@ -1,114 +1,123 @@
-# Radon Fan Monitor — user and installation guide
+# Installation and operating guide — v2.1
 
-**Software release:** 2.0 (replacement for the 2024 CircuitPython project)  
-**Target:** Raspberry Pi Pico W · CircuitPython 9.1.1 · MPRLS absolute-pressure breakout · piezo buzzer
+**Hardware:** Raspberry Pi Pico W, Adafruit MPRLS ported 0–25 PSI absolute pressure breakout (tube to radon pipe), Adafruit BME280 exposed to room air, GP2 PWM piezo buzzer. **Target firmware:** CircuitPython 9.1.1, as used by the original project.
 
-## 1. What it does, and what it cannot do
+**Important:** This project monitors *estimated suction* to infer radon-mitigation fan operation. It does **not measure radon concentration**, guarantee mitigation performance, or replace a conventional manometer and periodic radon testing. Sensor offsets and drift can produce inaccurate readings.
 
-This device attempts to detect *changes in the operating pressure* inside a radon mitigation suction pipe. It measures absolute pressure through the MPRLS, compares a rolling average to a threshold calculated from two saved calibration measurements, and sounds a local alarm when suction appears inadequate. A separate fault alarm indicates that readings cannot be trusted. When Wi-Fi works, a local browser can read status and silence the audible alarm.
+## 1. Back up and prepare
 
-**It does NOT measure indoor radon.** It cannot establish that a mitigation system is achieving safe radon concentration. It is NOT a certified life-safety device. A normal state can be wrong if local barometric pressure changes. Use independent radon testing and follow the mitigation contractor's recommendations.
+1. Connect the Pico to a computer by USB. **Make a complete backup of the existing CIRCUITPY contents before replacing anything**; preserve private Wi-Fi settings and original calibration for your own records.
+2. Check `boot_out.txt` for the version actually installed on the Pico. **For CircuitPython 9.x, use libraries from the 9.x `.mpy` bundle** available at [circuitpython.org/libraries](https://circuitpython.org/libraries); 8.x libraries are incompatible. Do not install every library from the bundle.
+3. Power off and wire the new BME280 in parallel with the MPRLS on the same **GP12/GP13** I²C bus, plus 3V3 and GND. The BME280 remains open to the **room air**, not connected by tubing. See [WIRING.md](WIRING.md).
+4. Install the following modules in `/lib` (or verify an identical matching version is already available): `adafruit_mprls.mpy`; `adafruit_bme280/basic.mpy` and `adafruit_bme280/protocol.mpy`; the `adafruit_httpserver/` directory; and `adafruit_bus_device/` if the sensor drivers fail to import its I²C helper. The BME280 Python package's `__init__.mpy` can also be copied if present. Match all modules to the board firmware.
+5. Copy `CIRCUITPY/boot.py`, `code.py`, and `monitor.py` to the **root** of the mounted CIRCUITPY drive. Copy `settings.example.json` to **`settings.json`**, at that same root. The example contains no actual credentials. Fill in `ssid`/`wifi_pwd` privately for 2.4 GHz Wi-Fi, or leave blank for buzzer-only mode.
+6. Leave `calibration_stage: "zero"`, and `sensor_offset_hpa` / `baseline_suction_hpa` as `null`. These are new calibration parameters. **Do not reuse** the saved 2024 `ambient_pressure_hpa` and `working_pressure_hpa` values.
 
-## 2. Repository layout and hardware
+Do not expose the web interface to the Internet. It has **no authentication** and its alarm acknowledgment route is only appropriate for a trusted LAN.
 
-The repository stores **source files**, not a directly flashable CircuitPython image. Copy `CIRCUITPY/code.py`, `boot.py`, and `monitor.py` to the root of the Pico's CIRCUITPY drive, and create device-local `/settings.json` from `CIRCUITPY/settings.example.json`. Install the matching CircuitPython 9.x `adafruit_mprls` and `adafruit_httpserver` libraries, plus `adafruit_bus_device` if required, under the Pico's `/lib/` directory. The original wiring image remains in the root of the GitHub repository; see `docs/WIRING.md` for the corrected text wiring reference.
+## 2. Two-stage calibration — REQUIRED after adding BME280
 
-## 3. Back up, install and start
+Both stages collect paired BME280/MPRLS readings over the configured `average_window_s` (default 300 seconds, five minutes). The Pico records progress through the USB serial console and writes the result to `settings.json` with a backup.
 
-1. Connect the Pico W by USB. Copy the entire CIRCUITPY drive to your computer **before** changing anything, including Wi-Fi settings and prior calibration data.
-2. Record its CircuitPython version from `boot_out.txt` or USB serial. The previous downloadable deployment ZIP used the original CircuitPython 9.1.1 `.mpy` files, but this GitHub source tree intentionally omits binary libraries. Install compatible libraries from the matching Adafruit bundle.
-3. Remove old `code.py` and now-unused Adafruit IO libraries, then copy the three Python files from this repo's `CIRCUITPY/` folder to the drive root. Do not leave behind an old root `asyncio` library merely because the old application used it; the new app doesn't need it.
-4. Copy `settings.example.json` to device-local `settings.json` if needed, then set `ssid` and `wifi_pwd` to the local **2.4 GHz** wireless network, or leave them blank for standalone alarm-only operation. Wi-Fi credentials have intentionally been removed from the published archive.
-5. Confirm the physical pin mapping. Reboot the Pico W and open the CircuitPython USB serial console. The monitor should log a first pressure reading *before* trying Wi-Fi.
-6. If connected, access `http://<PICO_IP>/`. The machine-readable endpoint is `http://<PICO_IP>/status.json`.
+### Stage A: sensor zero (tube disconnected)
 
-**Do not flash or wire the Pico from the repository without checking the power and pin mapping.** Don't expose the HTTP service to the public Internet; it has no login and the acknowledge button is a local LAN control.
+1. **Power off the Pico.** Disconnect the pressure tube from the **MPRLS sensor port**, leaving that port exposed to room air. Both sensors must be sensing the same environment; the BME280 stays in room air at all times.
+2. Keep `calibration_stage: "zero"` with both calibration values `null`. Power the Pico, and monitor the serial console.
+3. For five minutes, the Pico calculates each paired `BME280 ambient − MPRLS open port` reading and averages their differences. It stores the result as `sensor_offset_hpa` and advances `calibration_stage` to `"baseline"`.
+4. The Pico **stops and asks for a power cycle**. Do not attach the pressure tube or edit the USB volume while the Pico is still powered/writing to flash. A zero offset of exactly 0.0 is valid.
 
-## 4. Normal operation
+### Stage B: working-suction baseline (fan operating)
 
-The monitor takes an MPRLS reading every `sample_interval_s` (default 10 s). It maintains a `average_window_s` (default 300 s) sliding average of the most recent samples. The signal is **absolute pressure in hectopascals (hPa)**, not a live room-to-pipe pressure differential.
+1. **Power off the Pico** after Stage A finishes. Reattach the tube from the MPRLS port to the mitigation pipe, ensure it is sealed, and verify the mitigation fan is operating normally.
+2. Power on the Pico. The saved `calibration_stage: "baseline"` initiates a second five-minute set of paired readings.
+3. The Pico computes `suction = (BME280 room − MPRLS pipe) − sensor_offset_hpa` for each pair, averages them, and saves `baseline_suction_hpa`. A baseline of 0.2 hPa or less is rejected as insufficient; very large or implausible values are also rejected.
+4. Successful completion advances to `calibration_stage: "ready"` and automatically reboots into ordinary monitoring. Verify live suction agrees reasonably with a conventional manometer before relying on any alarms.
 
-- **NORMAL** — recent valid pressure measurements are below the configured absolute threshold. This is a fan-operation indication, not a radon-safety assurance.
-- **LOW_SUCTION_PENDING** — rolling pressure is too high (toward ambient); the alarm delay timer is counting.
-- **LOW_SUCTION_ALARM** — above the threshold continuously for the delay (default 300 s). The buzzer repeats five short beeps.
-- **MONITOR_FAULT** — reading acquisition failed, readings are stale, or the sensor returned an implausible value enough times. The buzzer repeats three longer beeps.
-- **STARTUP** — brief initial state before first successful reading; an initial sensor-read failure immediately becomes MONITOR_FAULT.
+To deliberately recalibrate later, **back up `settings.json`**, then on a host set `calibration_stage` to `"zero"`, both `sensor_offset_hpa` and `baseline_suction_hpa` to JSON `null`, save, disconnect tubing, and repeat the two stages. The unit does **not** periodically self-zero in normal operation. Recalibrating with the fan running and the tube attached during zero stage would erase the suction signal.
 
-Acknowledge/silence through the local web page's button (`POST /ack`). This silences the *current* alarm only; it does not change the state and a new alarm after recovery re-enables the buzzer. The webpage refreshes every 15 seconds. The watchdog restarts the Pico if the application loop stops progressing, but it is NOT a substitute for a secondary monitor.
+**Filesystem warning:** During calibration, `boot.py` remounts the storage writable to the Pico, not to your host computer. Never write to the mounted USB volume from both simultaneously. The write algorithm retains `settings.backup.json`, but replacing a file on FAT is not power-loss atomic. Restore it from a computer if needed.
 
-## 5. Thresholds — especially important
+## 3. What normal operation reports
 
-The original calibration saved **952.776 hPa ambient** and **949.865 hPa with the sensor attached to the pipe**. Their difference is 2.911 hPa (~1.17 inches of water column) *at calibration time*. The app does not measure this differential continuously.
+The application samples **both sensors** every `sample_interval_s` (10 s default), subtracts the stored zero offset, and maintains a five-minute rolling mean of suction in hPa. A positive value indicates the pipe is below room pressure.
 
-`alarm_loss_percent` is the percentage of the *saved suction margin lost* at which the pending alarm begins:
+- **NORMAL:** recent valid paired measurements, rolling suction above the configured minimum.
+- **LOW_SUCTION_PENDING:** rolling suction at or below the minimum; a 300-second persistence timer has started.
+- **LOW_SUCTION_ALARM:** reduced suction persists beyond the delay; five short beeps repeat.
+- **MONITOR_FAULT:** no initial pair, too many failed pairs, or readings older than `stale_after_s`; three longer beeps repeat. **No fallback to absolute-only monitoring.**
+- **STARTUP:** waiting for the first pair. An initial failure immediately becomes a fault.
 
-`threshold_hpa = working_pressure_hpa + (ambient_pressure_hpa - working_pressure_hpa) × alarm_loss_percent / 100`
+Following a sensor fault, the default is to require **three consecutive successful paired samples** before returning to normal or pending. Repeating faults do not silently clear. Acknowledge from `POST /ack` to silence the *current* buzzer without changing the alarm state.
 
-The migrated setting is **10%**, preserving the 2024 flash settings. It produces a threshold near **950.156 hPa**, only **0.291 hPa** above the calibrated pipe pressure. It is exceptionally sensitive to ordinary weather changes. The original prose suggested **65%**, but that was not the value on the device. We did **not** silently change it: decide which is appropriate after testing on the installed system. The newer software accepts only a numeric percentage from 1 through 100; it no longer overloads decimal numbers as absolute pressure values.
+### Threshold calculation
 
-`hysteresis_hpa` (default 0.15 hPa) requires the average to recover below a lower threshold before clearing an active alarm. `alarm_delay_s` begins when the rolling average is above the threshold and resets after it returns to normal. The rolling window plus the delay can make fan-shutdown detection take many minutes. Weather changes can still cause false *or missed* alerts even with filtering.
+`alarm_loss_percent` = 10% by default, **the value on the original Pico**; the older document's example of 65% was not the saved setting. This parameter indicates the tolerated loss from the *newly measured* baseline.
 
-## 6. Two-stage recalibration
+```text
+minimum_suction_hpa = baseline_suction_hpa * (1 - alarm_loss_percent/100)
+recovery_suction_hpa = minimum_suction_hpa + hysteresis_hpa
+```
 
-Recalibration writes to flash only when deliberately requested. **Back up the settings first**. Perform calibration under normal expected system conditions; don't inadvertently calibrate a failed fan as normal.
+For an **illustrative** 2.911 hPa baseline, 10% loss means an alarm-pending threshold of **2.620 hPa**. A 0.15 hPa hysteresis means an active alarm clears at **2.770 hPa** or greater. Those numbers are **NOT loaded as the new calibration**; the actual device determines them after Stage B. The rolling window *plus* the persistence delay means a real failure can take many minutes to alarm. Do not enable an immediate low-suction alarm without first characterizing sensor noise.
 
-1. With power removed, disconnect the *pressure tubing from the MPRLS port*, leaving the port open to room air; keep the electrical connection intact.
-2. From a computer, edit `settings.json`: set `ambient_pressure_hpa` to `0` (do not change Wi-Fi values). Save, eject the CIRCUITPY drive safely, and restart the Pico.
-3. For the next five minutes, the Pico measures ambient pressure, backs up old settings in `settings.backup.json`, writes the new ambient value and resets `working_pressure_hpa` to `0`. It then **stops and waits for a physical power cycle**. Watch the serial output for confirmation.
-4. Remove power. Securely attach the pressure tubing to the MPRLS port and the radon suction tap. Confirm the mitigation fan is operating.
-5. Restore power. The Pico measures the pipe's absolute pressure for five minutes, writes it, then automatically reboots into monitoring mode. It refuses a working calibration that shows 0.2 hPa or less of suction relative to the saved ambient value.
-6. After successful calibration, `boot.py` makes flash read-only to Pico code (the host can still manage the CIRCUITPY volume). Reinspect `settings.json` and verify readings and the alarm threshold.
+## 4. Dashboard, API and UniFi
 
-**Power-off and USB writing warning:** While in a calibration boot, the Pico gets filesystem write ownership; avoid editing CIRCUITPY from the host at the same time. `settings.backup.json` holds the prior settings. If power fails in the short replace step and `settings.json` is missing or corrupt, restore a known-good `settings.json` from your backup on a PC and restart.
+Once the Pico associates with its 2.4 GHz Wi-Fi network, browse to `http://<PICO_IP>/`. It shows live estimated suction in hPa/inH2O, room and pipe absolute pressures, the saved calibration offset and baseline, rolling average, alarm threshold, state, sensor failures, temperature, humidity, uptime, and diagnostic information.
 
-## 7. Wi-Fi, HTTP and UniFi notifications
+| HTTP route | Function |
+|---|---|
+| `GET /` | Auto-refreshing local status dashboard |
+| `GET /status.json` | Machine-readable diagnostics and readings |
+| `POST /ack` | Acknowledge/silence current audible alarm; **does not** clear alarm condition |
 
-Network operations are **best effort**. Pressure monitoring begins before the initial Wi-Fi connection. If connection fails, the local alarm continues. The Pico W Wi-Fi stack attempts automatic reconnection after a successful association, and the application makes time-bounded retry attempts once per `wifi_retry_s` (default 60 s) when disconnected. The HTTP server is stopped and recreated after a link change or socket failure.
+Wi-Fi and HTTP are **optional**: the buzzer and pressure monitor continue without Internet access or a working access point, subject to the cooperative-loop/driver constraints below. The AP/controller can send a UniFi **wireless client disconnected** alert for the Pico. Test it by disconnecting the Pico's power. Association alone does not prove the sensor software is healthy; a faulted monitor may remain connected to Wi-Fi.
 
-On the friend's UniFi controller, identify the Pico's wireless client, preferably give it a DHCP reservation, and configure a **client disconnected/offline notification** for that client using the network application's available alarm settings. Then unplug the Pico to verify that a notification really arrives. UniFi's client-offline alert tests Wi-Fi presence—not necessarily sensor health. A Pico may remain associated even during an application or sensor problem. The local fault buzzer and `/status.json` are the primary indication of monitor health.
+The Pico W Wi-Fi `connect()` call is synchronous; unusual AP/driver hangs can still interfere with sampling until the 8-second watchdog resets the microcontroller. Verify this on the real device during Wi-Fi outage/recovery tests.
 
-- Local webpage: `GET /`
-- Structured status: `GET /status.json`
-- Silence buzzer: `POST /ack`
-- Remote reset: deliberately removed
-- Internet/Adafruit IO: not used
+## 5. Configuration reference
 
-**LAN security:** The HTTP server does not authenticate users. Keep it on a trusted/private network or restrictive IoT VLAN with only intended access. Never port-forward TCP/80 to the Internet.
-
-## 8. Settings summary
-
-All settings live in the single `CIRCUITPY/settings.json` file. Time units are now explicit in field names.
-
-| Setting | Included value | Meaning |
-|---|---:|---|
+| Key | Default/template | Meaning |
+|---|---|---|
+| `ssid`, `wifi_pwd` | blank | 2.4 GHz Wi-Fi; optional for local alarm |
 | `hostname` | `RnFanMonitor` | Wi-Fi hostname |
-| `ssid` / `wifi_pwd` | blank | Enter local Wi-Fi credentials; optional for buzzer |
-| `ambient_pressure_hpa` | 952.776 | Saved calibration in open room air |
-| `working_pressure_hpa` | 949.865 | Saved calibration with fan operating |
-| `sample_interval_s` | 10 | How often to read MPRLS |
-| `average_window_s` | 300 | Sliding average history |
-| `alarm_loss_percent` | 10 | Percentage of saved suction margin lost before pending alarm |
-| `alarm_delay_s` | 300 | Continuous time above threshold until alarm |
-| `hysteresis_hpa` | 0.15 | Extra margin needed to clear active alarm |
-| `alarm_repeat_s` | 15 | Repetition interval after a beep sequence finishes |
-| `sensor_fault_after` | 3 | Consecutive failed readings before fault; first-ever failure immediately faults |
-| `stale_after_s` | 35 | Valid reading older than this produces a monitor fault |
-| `wifi_retry_s` | 60 | Retry interval if disconnected |
-| `wifi_connect_timeout_s` | 3 | Requested limit on a synchronous Wi-Fi connect attempt |
+| `calibration_stage` | `zero` | Required sequence: `zero` → `baseline` → `ready` |
+| `sensor_offset_hpa` | `null` | Averaged **room minus open-port** bias; signed, zero valid |
+| `baseline_suction_hpa` | `null` | Verified, corrected fan-running suction; determined only in Stage B |
+| `bme280_i2c_address` | `119` | Decimal 0x77; `118` for 0x76 |
+| `sample_interval_s` | `10` | Paired reading interval |
+| `average_window_s` | `300` | Rolling suction mean window and calibration duration |
+| `alarm_loss_percent` | `10` | Percent of baseline suction permitted to disappear |
+| `alarm_delay_s` | `300` | Time below minimum before full alarm |
+| `hysteresis_hpa` | `0.15` | Additional suction required to clear active alarm; must be smaller than loss margin |
+| `alarm_repeat_s` | `15` | Gap between beep sequences |
+| `sensor_fault_after` | `3` | Consecutive bad pairs before monitor fault |
+| `sensor_recovery_samples` | `3` | Consecutive good pairs to recover from fault |
+| `stale_after_s` | `35` | Last valid paired sample age limit |
+| `wifi_retry_s` | `60` | Connection retry interval |
+| `wifi_connect_timeout_s` | `3` | Requested synchronous connect timeout in seconds |
 
-## 9. Acceptance and maintenance tests
+Temperature and humidity are **diagnostics only**, refreshed separately; they are not used to adjust suction.
 
-Before depending on the device, perform these tests **at the installed location**:
+## 6. Before you leave it unattended
 
-1. **Offline:** Power up with Wi-Fi credentials blank or the AP turned off; confirm sampling and local alarms continue and the device does not reboot repeatedly.
-2. **Online:** Restore Wi-Fi; confirm the dashboard shows refreshed readings, `/status.json` works, and UniFi sees the Pico.
-3. **Fan test:** Under appropriate safe conditions, stop the mitigation fan or remove the pressure tubing from the suction tap (leave the MPRLS port open to room air), and observe the pending state and eventual alarm. Restore normal suction and verify recovery. **Restore the tubing and fan promptly.**
-4. **Sensor test:** Power down, disconnect the sensor's I²C connection, power up, and confirm the three-long-beep monitor fault pattern; reattach only with power off.
-5. **Acknowledge:** Silence an alarm from the browser; confirm state remains alarmed and that a subsequent new alarm sounds again.
-6. **Watchdog:** Confirm `reset_reason` is exposed in `/status.json`. Do not deliberately hang a deployed unit just to test the watchdog unless you have a controlled test bench.
-7. **UniFi test:** Unplug the Pico and confirm the configured client-disconnect notification arrives; do not assume UniFi detects a stalled application that remains associated.
-8. **Soak:** Run continuously for several days and review live readings, reset reason, `total_failed_samples`, and `minimum_observed_free_heap_bytes`.
+Conduct these acceptance tests, ideally while observing the USB serial console:
 
-## 10. When something goes wrong
+1. Confirm initial **zero stage** and **baseline stage** finish with physically correct tubing and a reliably operating mitigation fan.
+2. Read `/status.json`: both sensor values should be plausible, and corrected suction should agree with a **real differential manometer**.
+3. Log readings for a few days with normal weather variation; examine offset repeatability and pressure noise against the manometer. The historical 10% setting corresponds to only ~0.291 hPa for the old 2.911 hPa reference; it may be **too tight** for these sensors.
+4. Temporarily disconnect the pressure tube from the **sensor** (leave port open to room air), or perform a controlled fan interruption if safe. Confirm low-suction pending/alarm after the configured delay. Restore the tube/fan promptly.
+5. Power off, temporarily disconnect the **BME280**, restart, confirm `MONITOR_FAULT` and three-long-beep pattern. Restore with power off. Repeat with the MPRLS if appropriate.
+6. Trigger and acknowledge a buzzer alarm, verify state remains alarmed; restore pressure and check hysteresis-based recovery and re-arm.
+7. Disable Wi-Fi/unplug the AP; confirm sampling/alarm survive. Restore Wi-Fi, check dashboard and `/status.json`.
+8. Unplug Pico and verify the **UniFi client-disconnect notification** actually arrives, with an appropriate delay and alert channel.
+9. Soak-test continuously for several days; watch failed sample count, reset reason, low free heap, and reboots.
 
-See `docs/TROUBLESHOOTING.md`. The USB serial console logs `[radon]` messages. If there is no web page, check Wi-Fi settings/IP, but remember the buzzer alarm does not need the network. If settings are invalid, the unit intentionally sounds a repeating fault tone; fix `settings.json` using USB. No Internet service or Adafruit IO account is required.
+If tests show noisy suction despite correct wiring/calibration, **do not assume dual absolute sensors are accurate enough**. A purpose-built differential pressure transducer may eventually be necessary. The current approach is an experiment until characterized.
+
+## 7. Troubleshooting and references
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [BEEP_CODES.md](BEEP_CODES.md), and [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md).
+
+- Adafruit BME280 driver/API: https://docs.circuitpython.org/projects/bme280/en/latest/api.html
+- CircuitPython 9.x `.mpy` libraries: https://circuitpython.org/libraries
+- Adafruit MPRLS sensor guide: https://learn.adafruit.com/adafruit-mprls-ported-pressure-sensor-breakout/overview

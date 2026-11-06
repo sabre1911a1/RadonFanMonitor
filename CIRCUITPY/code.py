@@ -1,14 +1,14 @@
-"""Radon mitigation FAN OPERATION monitor, v2.0.
+"""Radon mitigation FAN OPERATION monitor, v2.1.
 
-Hardware: Pico W + MPRLS absolute pressure sensor + PWM piezo buzzer.
+Hardware: Pico W + MPRLS pipe sensor + BME280 room sensor + buzzer.
 CircuitPython: target 9.1.1, using the user's original .mpy libraries.
 
 The local alarm NEVER requires Wi-Fi. No Adafruit IO, MQTT, or HTTPS.
 The web server is meant ONLY for a trusted private LAN.
 
-LIMITATION: pressure is measured ABSOLUTELY, not differentially. Changes in
-outdoor barometric pressure may cause false or missed alarms. Pressure is not
-radon concentration, and this is NOT a certified safety instrument.
+LIMITATION: calculated suction depends on two absolute sensors, their
+relative zero calibration and drift. Not a certified radon or pressure gauge.
+Pressure is NOT a measure of indoor radon concentration.
 """
 import board
 import busio
@@ -22,9 +22,9 @@ import socketpool
 import time
 import wifi
 
-import adafruit_mprls
 from adafruit_httpserver import GET, POST, Request, Response, Server
-from monitor import Monitor, ConfigError, FAULT, LOW_SUCTION, STARTUP, validate, valid_pressure
+from monitor import (Monitor, ConfigError, FAULT, LOW_SUCTION, STARTUP,
+                     validate, valid_pressure, calculate_suction)
 
 SETTINGS_PATH = "/settings.json"
 BACKUP_PATH = "/settings.backup.json"
@@ -41,6 +41,7 @@ MONITOR = None
 CFG = None
 PIEZO_OUT = None
 MPR = None
+BME = None
 I2C = None
 EOC_PIN = None
 RESET_PIN = None
@@ -52,35 +53,45 @@ HTTP_FAILURES = 0
 WIFI_ATTEMPTS = 0
 FREE_HEAP_LOW_WATER = None
 BOOT_RESET_REASON = str(microcontroller.cpu.reset_reason)
+ROOM_TEMP_C = None
+ROOM_HUMIDITY_PCT = None
+LAST_ENV_ERROR = ""
 
 # Static HTML avoids a separate index.html file and extra filesystem reads.
 HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="15"><title>Radon Fan Monitor</title>
 <style>body{{max-width:710px;margin:2em auto;padding:0 1em;font:16px system-ui,sans-serif;background:#f6f7f9;color:#18212b}}
 main{{background:white;padding:1.4em;border-radius:12px;border:1px solid #d5dce5}}h1{{font-size:1.5em}}
-strong{{font-size:1.15em}}dl{{display:grid;grid-template-columns:1fr 1fr;gap:.5em}}dt{{color:#52616e}}dd{{margin:0}}
+dl{{display:grid;grid-template-columns:1fr 1fr;gap:.5em}}dt{{color:#52616e}}dd{{margin:0}}
 hr{{border:0;border-top:1px solid #dde2e7}}button{{padding:.7em 1em}}small{{color:#56616c}}
 </style></head><body><main><h1>Radon Fan Monitor</h1>
 <h2>{state}</h2><p>{meaning}</p><hr>
-<dl><dt>Current absolute pressure</dt><dd>{reading} hPa</dd>
-<dt>Rolling average</dt><dd>{average} hPa</dd>
-<dt>Alarm threshold</dt><dd>{threshold} hPa</dd>
-<dt>Recovery threshold</dt><dd>{recovery} hPa</dd>
-<dt>Calibration suction difference*</dt><dd>{delta} hPa / {water} inH2O</dd>
-<dt>Last valid reading</dt><dd>{sample_age} seconds ago</dd>
+<h2>{suction_water} inH2O</h2><p>Live offset-corrected suction: {suction} hPa</p>
+<dl><dt>Rolling average suction</dt><dd>{average} hPa</dd>
+<dt>Minimum suction</dt><dd>{threshold} hPa</dd>
+<dt>Recovery suction</dt><dd>{recovery} hPa</dd>
+<dt>Calibrated baseline suction</dt><dd>{baseline} hPa</dd>
+<dt>Zero offset (BME - MPRLS)</dt><dd>{offset} hPa</dd>
+<dt>BME280 room pressure</dt><dd>{ambient} hPa</dd>
+<dt>MPRLS pipe pressure</dt><dd>{pipe} hPa</dd>
+<dt>Room temperature</dt><dd>{temperature} C</dd>
+<dt>Room humidity</dt><dd>{humidity} %</dd>
+<dt>Last paired pressure reading</dt><dd>{sample_age} seconds ago</dd>
 <dt>Wi-Fi</dt><dd>{wifi_status}</dd>
 <dt>IP address</dt><dd>{ip}</dd>
 <dt>Uptime</dt><dd>{uptime} seconds</dd>
-<dt>Sensor failures</dt><dd>{faults}</dd>
+<dt>Failed paired samples</dt><dd>{faults}</dd>
 <dt>Alarm acknowledged</dt><dd>{acknowledged}</dd>
 <dt>Last reboot reason</dt><dd>{reset_reason}</dd>
 <dt>Free heap / minimum</dt><dd>{heap} / {heap_low} bytes</dd></dl>
 {ack_button}<hr>
-<small>*Saved difference between two absolute-pressure calibration measurements, NOT live differential suction.
-This monitor does not measure radon concentration. A healthy fan indication does not establish safe radon levels.</small>
-<p><small>JSON: <a href="/status.json">/status.json</a>. Refreshes every 15 seconds. LAN only.</small></p>
+<small>Calculated suction uses TWO absolute sensors plus a stored zero offset. Sensor drift can cause false/missed alarms.
+A healthy pressure result does NOT establish safe indoor radon levels; verify radon independently.</small>
+<p><small>JSON: <a href="/status.json">/status.json</a>. Refreshes every 15 seconds. Trusted LAN only.</small></p>
 </main></body></html>"""
+
+
 
 
 def say(message):
@@ -104,45 +115,75 @@ def load_settings():
     return validate(c)
 
 
-def save_calibration(key, value):
-    """Backup -> temp -> replace settings. Filesystem is Pico-RW only during calibration."""
-    with open(SETTINGS_PATH, "r") as f:
-        current = json.load(f)
-    # Save previous valid version before replacing it.
-    with open(BACKUP_PATH, "w") as f:
-        json.dump(current, f)
-        f.flush()
+def save_calibration(stage, value):
+    """Backup -> temp -> replace settings; only used with Pico-owned volume."""
+    with open(SETTINGS_PATH, "r") as file:
+        current = json.load(file)
+    with open(BACKUP_PATH, "w") as file:
+        json.dump(current, file)
+        file.flush()
     os.sync()
-    current[key] = round(value, 4)
-    if key == "ambient_pressure_hpa":
-        current["working_pressure_hpa"] = 0
-    with open(TEMP_PATH, "w") as f:
-        json.dump(current, f)
-        f.flush()
+    if stage == "zero":
+        current["sensor_offset_hpa"] = round(value, 5)
+        current["baseline_suction_hpa"] = None
+        current["calibration_stage"] = "baseline"
+    elif stage == "baseline":
+        current["baseline_suction_hpa"] = round(value, 5)
+        current["calibration_stage"] = "ready"
+    else:
+        raise ValueError("Unknown calibration stage")
+    validate(current)
+    with open(TEMP_PATH, "w") as file:
+        json.dump(current, file)
+        file.flush()
     os.sync()
-    # `os.replace` isn't guaranteed on CircuitPython's FAT filesystem.
     os.remove(SETTINGS_PATH)
     os.rename(TEMP_PATH, SETTINGS_PATH)
     os.sync()
 
 
-def init_mprls():
-    global I2C, RESET_PIN, EOC_PIN, MPR
+
+def init_sensors():
+    """Shared I2C bus on GPIO12/13; hardware pressure channels are separate."""
+    global I2C, RESET_PIN, EOC_PIN, MPR, BME
     if I2C is None:
         I2C = busio.I2C(scl=I2C_SCL, sda=I2C_SDA)
         RESET_PIN = digitalio.DigitalInOut(MPRLS_RESET)
         EOC_PIN = digitalio.DigitalInOut(MPRLS_EOC)
-    MPR = adafruit_mprls.MPRLS(
-        I2C, eoc_pin=EOC_PIN, reset_pin=RESET_PIN, psi_min=0, psi_max=25
-    )
-    return MPR
-
-
-def acquire_pressure():
-    global MPR
     if MPR is None:
-        init_mprls()
-    return MPR.pressure
+        import adafruit_mprls
+        MPR = adafruit_mprls.MPRLS(
+            I2C, eoc_pin=EOC_PIN, reset_pin=RESET_PIN, psi_min=0, psi_max=25)
+    if BME is None:
+        from adafruit_bme280 import basic as adafruit_bme280
+        BME = adafruit_bme280.Adafruit_BME280_I2C(
+            I2C, address=CFG["bme280_i2c_address"])
+
+
+def acquire_pair():
+    init_sensors()
+    # Read sequentially on the same bus. No mixing readings from cycles.
+    ambient = BME.pressure
+    pipe = MPR.pressure
+    if not valid_pressure(ambient, ambient=True) or not valid_pressure(pipe):
+        raise ValueError("Invalid BME280 or MPRLS pressure")
+    return ambient, pipe
+
+
+def read_environment():
+    """Informational only. Temperature/humidity never alter suction alarm."""
+    global ROOM_TEMP_C, ROOM_HUMIDITY_PCT, LAST_ENV_ERROR
+    if BME is None:
+        return
+    try:
+        ROOM_TEMP_C = round(BME.temperature, 1)
+        ROOM_HUMIDITY_PCT = round(BME.relative_humidity, 1)
+        LAST_ENV_ERROR = ""
+    except Exception as exc:
+        LAST_ENV_ERROR = str(exc)[:100]
+        ROOM_TEMP_C = None
+        ROOM_HUMIDITY_PCT = None
+
 
 
 class Buzzer:
@@ -204,11 +245,17 @@ def fatal_alarm(message):
 
 
 def calibrate(cfg):
-    """Two deliberate stages, automatically entered only if a value is 0."""
-    global MPR
-    ambient = cfg["ambient_pressure_hpa"] == 0
-    key = "ambient_pressure_hpa" if ambient else "working_pressure_hpa"
-    say("Calibration: " + ("ambient (tubing DISCONNECTED)" if ambient else "pipe (tubing CONNECTED)"))
+    """Deliberate paired-sensor zero, then working suction calibration.
+
+    Stage zero: MPRLS tube DISCONNECTED and both sensors exposed to room air.
+    Stage baseline: tube connected and mitigation fan operating normally.
+    """
+    global MPR, BME
+    stage = cfg["calibration_stage"]
+    if stage not in ("zero", "baseline"):
+        return
+    say("Calibration stage: " + stage)
+    say("ZERO = tube disconnected; BASELINE = tube connected, fan on")
     interval = cfg["sample_interval_s"]
     end = time.monotonic() + cfg["average_window_s"]
     next_read = time.monotonic()
@@ -219,36 +266,37 @@ def calibrate(cfg):
         if now >= next_read:
             next_read += interval
             try:
-                sample = acquire_pressure()
-                if not valid_pressure(sample):
-                    raise ValueError("Invalid absolute pressure: " + str(sample))
-                total += sample
+                ambient, pipe = acquire_pair()
+                difference = ambient - pipe
+                value = difference if stage == "zero" else difference - cfg["sensor_offset_hpa"]
+                if not -50 <= value <= 100:
+                    raise ValueError("Implausible pressure difference")
+                total += value
                 count += 1
-                say("calibration sample " + str(count) + ": " + str(round(sample, 3)) + " hPa")
+                say("calibration pair " + str(count) + ": room=" + str(round(ambient, 3)) +
+                    " pipe=" + str(round(pipe, 3)) + " diff=" + str(round(value, 3)))
             except Exception as exc:
-                MPR = None
-                say("Calibration sample failed: " + str(exc))
-                # Do not write partial/bad calibrations.
-                fatal_alarm("Calibration failed. Fix sensor and reboot to retry.")
+                MPR, BME = None, None
+                fatal_alarm("Calibration failed; check both sensors: " + str(exc))
         time.sleep(0.05)
     if count < 3:
-        fatal_alarm("Not enough calibration readings")
-    pressure = total / count
-    if not ambient and cfg["ambient_pressure_hpa"] - pressure <= 0.2:
-        fatal_alarm("Pipe measurement does not show enough suction; check the fan/tubing")
+        fatal_alarm("Not enough paired calibration readings")
+    value = total / count
+    if stage == "baseline" and not 0.2 < value <= 50:
+        fatal_alarm("Corrected suction invalid; check fan, tubing and zero offset")
     try:
-        save_calibration(key, pressure)
+        save_calibration(stage, value)
     except Exception as exc:
-        fatal_alarm("Cannot save calibration; restore settings from backup: " + str(exc))
-    say("Saved " + key + ": " + str(round(pressure, 3)) + " hPa")
-    if ambient:
-        say("POWER OFF. Attach tubing to suction pipe, then power on for pipe calibration.")
-        # No WDT during calibration, so we can stop here safely.
+        fatal_alarm("Cannot save calibration; restore settings backup: " + str(exc))
+    say("Saved " + stage + " calibration: " + str(round(value, 4)) + " hPa")
+    if stage == "zero":
+        say("POWER OFF; attach tubing to suction pipe, then power on for baseline stage.")
         while True:
             time.sleep(1)
-    say("Calibration complete; rebooting")
+    say("Baseline calibration complete; rebooting in normal monitoring mode")
     time.sleep(1)
     microcontroller.reset()
+
 
 
 def status_data(now):
@@ -268,8 +316,11 @@ def status_data(now):
         "free_heap_bytes": heap,
         "minimum_observed_free_heap_bytes": FREE_HEAP_LOW_WATER,
         "reset_reason": BOOT_RESET_REASON,
-        "firmware": "radon-fan-monitor-2.0",
-        "measurement_type": "absolute_pressure",
+        "firmware": "radon-fan-monitor-2.1",
+        "measurement_type": "offset_corrected_suction_from_two_absolute_sensors",
+        "room_temperature_c": ROOM_TEMP_C,
+        "room_humidity_percent": ROOM_HUMIDITY_PCT,
+        "last_environment_error": LAST_ENV_ERROR,
     })
     return result
 
@@ -296,16 +347,19 @@ def build_server():
             elif state == STARTUP:
                 meaning = "Waiting for first valid pressure reading."
             else:
-                meaning = "Pressure is within this unit's saved absolute-pressure threshold."
+                meaning = "Offset-corrected suction is above the configured minimum."
             ack = ""
             if state in (FAULT, LOW_SUCTION) and not d["alarm_acknowledged"]:
                 ack = '<form method="post" action="/ack"><button>Acknowledge / silence buzzer</button></form>'
             body = HTML.format(
                 state=safe_text(state), meaning=safe_text(meaning),
-                reading=fmt(d["last_reading_hpa"]), average=fmt(d["rolling_average_hpa"]),
-                threshold=fmt(d["alarm_threshold_hpa"]), recovery=fmt(d["recovery_threshold_hpa"]),
-                delta=fmt(d["calibration_delta_hpa"]),
-                water=round(d["calibration_delta_hpa"] / 2.49089, 2),
+                suction=fmt(d["last_suction_hpa"]),
+                suction_water="--" if d["last_suction_hpa"] is None else round(d["last_suction_hpa"] / 2.49089, 2),
+                average=fmt(d["rolling_average_suction_hpa"]),
+                threshold=fmt(d["minimum_suction_hpa"]), recovery=fmt(d["recovery_suction_hpa"]),
+                baseline=fmt(d["baseline_suction_hpa"]), offset=fmt(d["sensor_offset_hpa"]),
+                ambient=fmt(d["last_ambient_hpa"]), pipe=fmt(d["last_pipe_hpa"]),
+                temperature=fmt(d["room_temperature_c"]), humidity=fmt(d["room_humidity_percent"]),
                 sample_age=fmt(d["seconds_since_valid_reading"]),
                 wifi_status="Connected" if d["wifi_connected"] else "Disconnected",
                 ip=fmt(d["ip_address"]), uptime=d["uptime_seconds"], faults=d["total_failed_samples"],
@@ -364,10 +418,10 @@ def connect_wifi(cfg):
 
 
 def main():
-    global MONITOR, CFG, PIEZO_OUT, MPR, LAST_HTTP_ERROR, HTTP_FAILURES
+    global MONITOR, CFG, PIEZO_OUT, MPR, BME, LAST_HTTP_ERROR, HTTP_FAILURES
     PIEZO_OUT = pwmio.PWMOut(PIEZO, frequency=4000, duty_cycle=0)
     CFG = load_settings()
-    if CFG["ambient_pressure_hpa"] == 0 or CFG["working_pressure_hpa"] == 0:
+    if CFG["calibration_stage"] != "ready":
         calibrate(CFG)
         return
 
@@ -379,19 +433,21 @@ def main():
     next_network = started + 1.0
     next_poll = started
     last_sample_loop = started
-    say("Monitoring started. Threshold: " + str(round(MONITOR.threshold_hpa, 3)) + " hPa")
+    say("Monitoring started. Minimum suction: " + str(round(MONITOR.minimum_suction_hpa, 3)) + " hPa")
 
     # Initialize before enabling the WDT; a failed sensor is a local fault, not
     # a reboot loop. Read once BEFORE attempting any Wi-Fi operation.
     try:
-        sample = acquire_pressure()
-        MONITOR.update(time.monotonic(), sample)
+        ambient, pipe = acquire_pair()
+        MONITOR.update(time.monotonic(), ambient, pipe)
+        read_environment()
     except Exception as exc:
-        MPR = None
+        MPR, BME = None, None
         MONITOR.update(time.monotonic(), error=exc)
         say("Initial sensor error: " + str(exc))
     last_sample_loop = time.monotonic()
     next_sample = last_sample_loop + interval
+    next_environment = last_sample_loop + 60
 
     from watchdog import WatchDogMode
     wdt = microcontroller.watchdog
@@ -406,16 +462,19 @@ def main():
         if now >= next_sample:
             last_sample_loop = now
             try:
-                sample = acquire_pressure()
-                MONITOR.update(now, sample)
-                say("hPa: " + str(round(sample, 3)) + " avg: " +
-                    str(round(MONITOR.average_hpa, 3)) + " state: " + MONITOR.state)
+                ambient, pipe = acquire_pair()
+                MONITOR.update(now, ambient, pipe)
+                say("suction hPa: " + str(round(MONITOR.last_suction_hpa, 3)) + " avg: " +
+                    str(round(MONITOR.average_suction_hpa, 3)) + " state: " + MONITOR.state)
             except Exception as exc:
-                MPR = None
+                MPR, BME = None, None
                 MONITOR.update(now, error=exc)
                 say("Sensor read failure: " + str(exc))
             # Skip missed deadlines; do not run a burst of stale readings.
             next_sample = now + interval
+        if now >= next_environment and BME is not None:
+            next_environment = now + 60
+            read_environment()
 
         now = time.monotonic()
         MONITOR.evaluate(now)
