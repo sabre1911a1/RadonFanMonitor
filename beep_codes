@@ -1,21 +1,9 @@
-Calibration Mode: 1 Long - _ Short
-----------------------------------
-2 = Starting ambient calibration - should take about 5 minutes
-3 = Starting working calibration - should take about 5 minutes
-4 = Ambient calibration value successfully updated - device will do nothing after this
-5 = Working calibration value successfully updated - device will reboot and begin monitoring
-6 = Error updating ambient value in settings.json file
-7 = Error updating working value in settings.json file
+# Legacy beep code notice
 
-WiFi Errors: 2 Long - _ Short
------------------------------
-2 = SSID not found - check settings.json file
-3 = Authentication error - check WiFi password in settings.toml file
-4 = General connection failure - view serial output to diagnose
-5 = Unhandled error - view serial output to diagnose
+The original 2024 beep numbers do not apply to version 2.1.
 
-Sensor or bus Error: 3 Long - _ Short 
--------------------------------------
-2 = No pull up found on SDA or SCL - check wiring from GPIO 20 (MCU) to SDA (MPRLS) and from GPIO 21 (MCU) to SCL (MPRLS)
-3 = Unhandled error - view serial output to diagnose
-4 = MPRLS sensor not found on i2c bus - check sensor wiring or replace sensor module
+Read docs/BEEP_CODES.md for current patterns:
+- Repeating five short beeps: low suction alarm.
+- Repeating three longer beeps: monitor fault (including either pressure sensor).
+
+Wiring: I2C SDA=GP12, SCL=GP13 (not GP20/GP21).
